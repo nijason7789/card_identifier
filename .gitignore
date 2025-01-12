@@ -169,3 +169,7 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# reference cards and card picture
+/data/reference_cards/
+/data/card_picture/
