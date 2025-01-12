@@ -41,7 +41,7 @@ htmlcov/
 .tox/
 .nox/
 .coverage
-.coverage.*
+.coverage.* 
 .cache
 nosetests.xml
 coverage.xml
@@ -173,3 +173,7 @@ cython_debug/
 # reference cards and card picture
 /data/reference_cards/
 /data/card_picture/
+
+# temp directory for downloads
+/temp/
+*.log

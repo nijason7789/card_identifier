@@ -1,163 +1,215 @@
 """
-共用工具模組，包含基礎的圖像處理和特徵匹配功能
+工具類模組
 """
 
-import cv2
-import numpy as np
-from dataclasses import dataclass
-from typing import Dict, List, Tuple
 import os
+import cv2
+import logging
+import numpy as np
+from typing import Dict, List, Tuple, Optional
 
-@dataclass
-class MatchResult:
-    """匹配結果數據類"""
-    card_name: str
-    score: float
-    visualization: np.ndarray
+class ImageProcessor:
+    """基礎圖像處理類"""
+    
+    def __init__(self, display_height: int = 400):
+        """初始化圖像處理器
+        
+        Args:
+            display_height: 顯示圖片的統一高度
+        """
+        self.display_height = display_height
+    
+    def resize_image(self, image: np.ndarray) -> np.ndarray:
+        """調整圖片大小到統一高度
+        
+        Args:
+            image: 輸入圖片
+            
+        Returns:
+            調整後的圖片
+        """
+        h, w = image.shape[:2]
+        scale = self.display_height / h
+        return cv2.resize(image, (int(w * scale), self.display_height))
+    
+    def create_display_image(self, 
+                           query_img: np.ndarray,
+                           ref_images: List[Tuple[np.ndarray, str, float]]) -> np.ndarray:
+        """創建顯示圖像
+        
+        Args:
+            query_img: 查詢圖片
+            ref_images: 參考圖片列表，每個元素為 (圖片, 卡片ID, 分數) 的元組
+            
+        Returns:
+            合併後的顯示圖像
+        """
+        # 調整查詢圖片大小
+        query_display = self.resize_image(query_img)
+        
+        # 準備參考卡片顯示
+        ref_displays = []
+        for ref_img, card_id, score in ref_images[:3]:  # 只顯示前三個結果
+            # 調整參考卡片大小
+            ref_display = self.resize_image(ref_img)
+            
+            # 添加文字標註
+            cv2.putText(ref_display,
+                       f"{card_id}",
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                       (0, 255, 0), 2)
+            cv2.putText(ref_display,
+                       f"Score: {score:.2f}%",
+                       (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                       (0, 255, 0), 2)
+            
+            ref_displays.append(ref_display)
+        
+        # 水平拼接所有圖片
+        all_displays = [query_display] + ref_displays
+        return cv2.hconcat(all_displays)
 
-class CardMatcher:
-    """卡片匹配器基類"""
+class CardMatcher(ImageProcessor):
+    """卡片匹配器類，用於識別和匹配卡片圖像"""
     
-    SCORE_THRESHOLD = 0.25  # 分數閾值
-    MATCH_DISPLAY_COUNT = 3  # 顯示的匹配結果數量
-    
-    def __init__(self, reference_dir: str = 'data/reference_cards'):
-        """初始化卡片匹配器"""
+    def __init__(self, 
+                 reference_dir: str = 'data/reference_cards',
+                 min_match_count: int = 20,
+                 score_threshold: int = 45):
+        """初始化卡片匹配器
+        
+        Args:
+            reference_dir: 參考卡片目錄路徑
+            min_match_count: 最小匹配點數量
+            score_threshold: 最小匹配分數閾值
+        """
+        super().__init__()
         self.reference_dir = reference_dir
+        self.min_match_count = min_match_count
+        self.score_threshold = score_threshold
         self.reference_cards: Dict[str, Dict] = {}
-        self.orb = cv2.ORB_create()
-        self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        
+        # 初始化特徵檢測器和匹配器
+        self.feature_detector = cv2.ORB_create()
+        self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        
+        # 載入參考卡片
         self._load_reference_cards()
     
+    def _extract_features(self, image: np.ndarray) -> Tuple[Optional[List], Optional[np.ndarray]]:
+        """提取圖像特徵
+        
+        Args:
+            image: 輸入圖像
+            
+        Returns:
+            特徵點和描述符的元組
+        """
+        try:
+            return self.feature_detector.detectAndCompute(image, None)
+        except Exception as e:
+            logging.error(f"特徵提取失敗: {str(e)}")
+            return None, None
+    
+    def _calculate_match_score(self, matches: List, min_count: int) -> float:
+        """計算匹配分數
+        
+        Args:
+            matches: 匹配結果列表
+            min_count: 最小匹配點數量
+            
+        Returns:
+            匹配分數 (0-100)
+        """
+        if len(matches) < min_count:
+            return 0.0
+            
+        # 計算前N個最佳匹配的平均距離
+        avg_distance = sum(m.distance for m in matches[:min_count]) / min_count
+        return max(0, 100 - avg_distance)
+    
+    def _load_single_card(self, card_path: str, card_set: str, card_name: str) -> None:
+        """載入單張參考卡片"""
+        try:
+            img = cv2.imread(card_path)
+            if img is None:
+                logging.error(f"無法讀取卡片圖片: {card_path}")
+                return
+                
+            # 提取特徵
+            keypoints, descriptors = self._extract_features(img)
+            if descriptors is None:
+                logging.error(f"無法計算卡片特徵: {card_path}")
+                return
+                
+            # 儲存卡片資訊
+            card_id = f"{card_set}/{card_name}"
+            self.reference_cards[card_id] = {
+                'img': img,
+                'keypoints': keypoints,
+                'descriptors': descriptors,
+                'card_set': card_set,
+                'card_name': card_name
+            }
+            logging.info(f"已載入卡片: {card_id}")
+            
+        except Exception as e:
+            logging.error(f"處理卡片時發生錯誤 {card_path}: {str(e)}")
+
     def _load_reference_cards(self) -> None:
-        """載入參考卡片圖片並提取特徵"""
+        """載入所有參考卡片"""
         if not os.path.exists(self.reference_dir):
-            raise FileNotFoundError(f"參考卡片目錄不存在: {self.reference_dir}")
+            logging.error(f"參考卡片目錄不存在: {self.reference_dir}")
+            return
             
-        for filename in os.listdir(self.reference_dir):
-            if not filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+        for card_set in os.listdir(self.reference_dir):
+            set_dir = os.path.join(self.reference_dir, card_set)
+            if not os.path.isdir(set_dir):
                 continue
                 
-            image_path = os.path.join(self.reference_dir, filename)
-            image = cv2.imread(image_path)
-            if image is None:
-                print(f"無法讀取圖片: {image_path}")
-                continue
-                
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            keypoints, descriptors = self.orb.detectAndCompute(gray, None)
-            
-            if descriptors is not None:
-                card_name = os.path.splitext(filename)[0]
-                self.reference_cards[card_name] = {
-                    'image': image,
-                    'keypoints': keypoints,
-                    'descriptors': descriptors
-                }
-        
-        print(f"已載入 {len(self.reference_cards)} 張參考卡片")
-    
-    def _calculate_similarity(self, image: np.ndarray, reference: Dict) -> Tuple[float, np.ndarray]:
-        """計算兩張圖片的相似度"""
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        keypoints, descriptors = self.orb.detectAndCompute(gray, None)
-        
-        if descriptors is None:
-            return 0.0, image
-            
-        matches = self.bf.match(descriptors, reference['descriptors'])
-        matches = sorted(matches, key=lambda x: x.distance)
-        
-        good_matches = [m for m in matches if m.distance < 45]
-        similarity_score = len(good_matches) / len(matches) if matches else 0
-        
-        result_img = cv2.drawMatches(
-            image, keypoints,
-            reference['image'], reference['keypoints'],
-            good_matches[:10], None,
-            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
-        )
-        
-        return similarity_score, result_img
-    
-    def _create_visualization(self, matches: List[MatchResult], input_image: np.ndarray) -> np.ndarray:
-        """創建匹配結果的視覺化圖像"""
-        if not matches:
-            return input_image
-            
-        ref_images = []
-        for match in matches[:3]:
-            card_name = match.card_name
-            if card_name in self.reference_cards:
-                img = self.reference_cards[card_name]['image'].copy()
-                
-                if match.score < self.SCORE_THRESHOLD:
-                    h, w = img.shape[:2]
-                    center_x = w // 2
-                    center_y = h // 2
+            for card_file in os.listdir(set_dir):
+                if not card_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    continue
                     
-                    font = cv2.FONT_HERSHEY_SIMPLEX
-                    text = "undefined"
-                    font_scale = 1.5
-                    thickness = 3
-                    
-                    (text_width, text_height), _ = cv2.getTextSize(text, font, font_scale, thickness)
-                    text_x = center_x - text_width // 2
-                    text_y = center_y + text_height // 2
-                    
-                    overlay = img.copy()
-                    cv2.rectangle(overlay, 
-                                (text_x - 10, text_y - text_height - 10),
-                                (text_x + text_width + 10, text_y + 10),
-                                (0, 0, 0), -1)
-                    cv2.addWeighted(overlay, 0.5, img, 0.5, 0, img)
-                    cv2.putText(img, text, (text_x, text_y), font, font_scale, (0, 0, 255), thickness)
-                
-                ref_images.append(img)
+                card_path = os.path.join(set_dir, card_file)
+                card_name = os.path.splitext(card_file)[0]
+                self._load_single_card(card_path, card_set, card_name)
         
-        if not ref_images:
-            return input_image
-            
-        camera_height, camera_width = input_image.shape[:2]
-        main_height, main_width = ref_images[0].shape[:2]
-        
-        camera_display = cv2.resize(input_image, (int(camera_width * main_height / camera_height), main_height))
-        side_width = main_width // 2
-        
-        total_width = camera_display.shape[1] + main_width + side_width
-        result = np.zeros((main_height, total_width, 3), dtype=np.uint8)
-        
-        result[:, :camera_display.shape[1]] = camera_display
-        
-        x_offset = camera_display.shape[1]
-        result[:, x_offset:x_offset + main_width] = ref_images[0]
-        
-        if len(ref_images) > 1:
-            small_width = side_width // 2
-            small_height = main_height // 2
-            
-            y_offset = (main_height - small_height) // 2
-            x_start = x_offset + main_width
-            
-            for i, img in enumerate(ref_images[1:3]):
-                small_img = cv2.resize(img, (small_width, small_height))
-                x_pos = x_start + (small_width * i)
-                result[y_offset:y_offset + small_height, x_pos:x_pos + small_width] = small_img
-        
-        return result
+        logging.info(f"共載入 {len(self.reference_cards)} 張參考卡片")
     
-    def _find_matches(self, image: np.ndarray) -> List[MatchResult]:
-        """找出圖片與所有參考卡片的匹配結果"""
-        matches = []
-        for card_name, card_data in self.reference_cards.items():
-            score, _ = self._calculate_similarity(image, card_data)
-            matches.append(MatchResult(card_name, score, None))
+    def find_matches(self, query_img: np.ndarray, min_match_count: Optional[int] = None) -> List[Tuple[str, float]]:
+        """尋找匹配的卡片
         
-        matches.sort(key=lambda x: x.score, reverse=True)
-        matches = matches[:self.MATCH_DISPLAY_COUNT]
-        
-        visualization = self._create_visualization(matches, image)
-        for match in matches:
-            match.visualization = visualization
+        Args:
+            query_img: 查詢圖片
+            min_match_count: 最小匹配點數量，如果為None則使用初始化時設定的值
             
-        return matches
+        Returns:
+            列表，包含 (卡片ID, 匹配分數) 的元組，按分數降序排序
+        """
+        min_match_count = min_match_count or self.min_match_count
+        
+        # 提取查詢圖片特徵
+        query_keypoints, query_descriptors = self._extract_features(query_img)
+        if query_descriptors is None:
+            return []
+        
+        matches_list = []
+        
+        # 與所有參考卡片比對
+        for card_id, card_info in self.reference_cards.items():
+            # 特徵匹配
+            matches = self.matcher.match(query_descriptors, card_info['descriptors'])
+            matches = sorted(matches, key=lambda x: x.distance)
+            
+            # 計算匹配分數
+            score = self._calculate_match_score(matches, min_match_count)
+            if score > self.score_threshold:
+                matches_list.append((card_id, score))
+        
+        # 按分數降序排序
+        return sorted(matches_list, key=lambda x: x[1], reverse=True)
+    
+    def get_card_info(self, card_id: str) -> Optional[Dict]:
+        """獲取卡片資訊"""
+        return self.reference_cards.get(card_id)
