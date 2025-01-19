@@ -177,3 +177,4 @@ cython_debug/
 # temp directory for downloads
 /temp/
 *.log
+yolov8n.pt

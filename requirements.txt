@@ -2,8 +2,9 @@ beautifulsoup4==4.12.2
 requests==2.31.0
 opencv-python==4.8.0.76
 numpy==1.24.3
-Pillow>=10.0.0
+ultralytics
 torch>=2.0.0
+Pillow>=10.0.0
 torchvision>=0.15.0
 Scrapy>=2.11.0
 itemadapter>=0.8.0
